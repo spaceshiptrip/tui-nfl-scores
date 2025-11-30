@@ -1,0 +1,98 @@
+.venv*/
+venv*/
+
+
+<F28># ---------------------------------------------------------
+# Python cache / compiled files
+# ---------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+
+# Bytecode cache directories (Python 3.8+)
+.pyre/
+.mypy_cache/
+.pytype/
+.dmypy.json
+
+# ---------------------------------------------------------
+# Virtual environments
+# ---------------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+
+# uv (if you use it)
+.uv/
+
+# pipenv
+Pipfile.lock
+
+# ---------------------------------------------------------
+# Build / packaging artifacts
+# ---------------------------------------------------------
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+
+# setuptools cache
+.pybuild/
+
+# ---------------------------------------------------------
+# Jupyter Notebooks
+# ---------------------------------------------------------
+.ipynb_checkpoints/
+*.ipynb
+
+# ---------------------------------------------------------
+# Editor settings
+# ---------------------------------------------------------
+
+# VSCode
+.vscode/
+.vscode-test/
+
+# PyCharm / IntelliJ
+.idea/
+
+# Vim / Neovim
+*.swp
+*.swo
+
+# ---------------------------------------------------------
+# Logging / temp files
+# ---------------------------------------------------------
+*.log
+*.tmp
+*.bak
+*.old
+
+# Output files from CLI usage
+*.csv
+*.json
+*.tsv
+
+# ---------------------------------------------------------
+# macOS clutter
+# ---------------------------------------------------------
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# ---------------------------------------------------------
+# Your project-specific ignore patterns
+# ---------------------------------------------------------
+
+# NFL query outputs / scratch
+output/
+test_output/
+scratch/
+<F29>
