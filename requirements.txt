@@ -1,0 +1,4 @@
+# requirements.txt
+requests
+beautifulsoup4
+pandas   # optional; keep if you use --csv / DataFrame
