@@ -1,0 +1,27 @@
+[project]
+name = "query-scores"
+version = "0.1.0"
+description = "CLI and library to fetch NFL scores from footballdb.com"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+
+authors = [
+  { name = "Jay Torres" }
+]
+
+dependencies = [
+  "requests",
+  "beautifulsoup4",
+  "pandas",  # keep if you want CSV/DataFrame support
+]
+
+[project.scripts]
+nflscores = "query_scores.fetch_nfl_scores:main"
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
