@@ -24,6 +24,7 @@ import time
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from typing import Any, List, Optional
+from datetime import datetime  # already imported at top, just make sure it's there
 
 import requests
 from bs4 import BeautifulSoup
@@ -450,6 +451,85 @@ def scores_to_dataframe(games: List[GameScore]):
     return pd.DataFrame([asdict(g) for g in games])
 
 
+
+
+def classify_game_status(status: str) -> str:
+    """
+    Classify a game's status into one of: 'live', 'upcoming', 'ended'.
+
+    Uses simple heuristics based on the status string, which typically looks like:
+      - 'FINAL', 'FINAL OT'
+      - '8:42 4th', '2:15 2nd', 'Halftime'
+      - '8:15 PM', '4:25 PM'
+    """
+    s = (status or "").strip().upper()
+
+    if not s:
+        return "upcoming"  # safest assumption
+
+    # Finished games
+    if s.startswith("FINAL"):
+        return "ended"
+
+    # Not started yet (kickoff time or scheduled)
+    if "AM" in s or "PM" in s or s in {"POSTPONED", "TBA"}:
+        return "upcoming"
+
+    # Everything else is in progress: "1ST", "2ND", "3RD", "4TH", "OT", "HALFTIME", etc.
+    return "live"
+
+
+def parse_game_datetime_from_id(game: GameScore) -> Optional[datetime]:
+    """
+    Parse a datetime from game_id, which looks like 'YYYYMMDDNN' (e.g. '2025113001').
+
+    Returns a datetime for the *date* only. We don't know exact kickoff time,
+    but using the date is good enough for ordering within groups.
+    """
+    gid = game.game_id
+    if not gid or len(gid) < 8:
+        return None
+    try:
+        return datetime.strptime(gid[:8], "%Y%m%d")
+    except ValueError:
+        return None
+
+
+def sort_games(games: List[GameScore]) -> List[GameScore]:
+    """
+    Sort games in-place and return them, using the following priority:
+
+      1) live games (in progress)
+      2) upcoming games (not yet started)
+      3) ended games (finished), with newest first, oldest last
+
+    Within each group, we use the game date (from game_id) as a tiebreaker.
+    """
+
+    def key(g: GameScore):
+        cls = classify_game_status(g.status)
+        rank_map = {"live": 0, "upcoming": 1, "ended": 2}
+        rank = rank_map.get(cls, 3)
+
+        dt = parse_game_datetime_from_id(g)
+        # If we can't parse a date, push it to the far past
+        ts = dt.timestamp() if dt is not None else 0.0
+
+        # For ended games we want *newest first*, so use -ts
+        if cls == "ended":
+            ts_key = -ts
+        else:
+            ts_key = ts
+
+        # Tie-breaker on game_id to make ordering stable
+        gid = g.game_id or ""
+        return (rank, ts_key, gid)
+
+    games.sort(key=key)
+    return games
+
+
+
 def format_game_line(g: GameScore, show_id: bool = True) -> str:
     """
     Format a single GameScore for display.
@@ -601,6 +681,10 @@ def main(argv=None):
         )
         merge_html_and_api(games, api_games)
 
+        # 🔽 apply unified sort
+        games = sort_games(games)
+
+
         # Snapshot outputs (before polling)
         if args.csv:
             df = scores_to_dataframe(games)
@@ -649,6 +733,12 @@ def main(argv=None):
         if args.team:
             games = filter_games_by_team(games, args.team)
 
+
+
+        # 🔽 apply unified sort
+        games = sort_games(games)
+
+
         if args.csv:
             df = scores_to_dataframe(games)
             df.to_csv(args.csv, index=False)
@@ -680,6 +770,9 @@ def main(argv=None):
 
     if args.team:
         games = filter_games_by_team(games, args.team)
+
+    # 🔽 apply unified sort
+    games = sort_games(games)
 
     if args.csv:
         df = scores_to_dataframe(games)
