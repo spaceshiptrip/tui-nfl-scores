@@ -24,7 +24,6 @@ import time
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from typing import Any, List, Optional
-from datetime import datetime  # already imported at top, just make sure it's there
 
 import requests
 from bs4 import BeautifulSoup
@@ -416,43 +415,8 @@ def merge_html_and_api(html_games: List[GameScore], api_games: List[GameScore]) 
 
 
 # ------------------------------------------------------------
-# Filtering, DataFrame, printing
+# Sorting helpers
 # ------------------------------------------------------------
-def filter_games_by_team(games: List[GameScore], team_query: str) -> List[GameScore]:
-    """
-    Return only games where the team_query (case-insensitive substring)
-    appears in either the away or home team name.
-    """
-    if not team_query:
-        return games
-
-    q = team_query.lower()
-    return [
-        g
-        for g in games
-        if q in (g.away_team or "").lower() or q in (g.home_team or "").lower()
-    ]
-
-
-def scores_to_dataframe(games: List[GameScore]):
-    """
-    Convert a list of GameScore objects to a pandas DataFrame.
-
-    Columns:
-      game_id, date, status, away_team, away_score, home_team, home_score
-
-    Requires pandas to be installed.
-    """
-    if pd is None:
-        raise ImportError(
-            "pandas is required for DataFrame/CSV operations.\n"
-            "Install it with:  pip install pandas"
-        )
-    return pd.DataFrame([asdict(g) for g in games])
-
-
-
-
 def classify_game_status(status: str) -> str:
     """
     Classify a game's status into one of: 'live', 'upcoming', 'ended'.
@@ -529,6 +493,41 @@ def sort_games(games: List[GameScore]) -> List[GameScore]:
     return games
 
 
+# ------------------------------------------------------------
+# Filtering, DataFrame, printing
+# ------------------------------------------------------------
+def filter_games_by_team(games: List[GameScore], team_query: str) -> List[GameScore]:
+    """
+    Return only games where the team_query (case-insensitive substring)
+    appears in either the away or home team name.
+    """
+    if not team_query:
+        return games
+
+    q = team_query.lower()
+    return [
+        g
+        for g in games
+        if q in (g.away_team or "").lower() or q in (g.home_team or "").lower()
+    ]
+
+
+def scores_to_dataframe(games: List[GameScore]):
+    """
+    Convert a list of GameScore objects to a pandas DataFrame.
+
+    Columns:
+      game_id, date, status, away_team, away_score, home_team, home_score
+
+    Requires pandas to be installed.
+    """
+    if pd is None:
+        raise ImportError(
+            "pandas is required for DataFrame/CSV operations.\n"
+            "Install it with:  pip install pandas"
+        )
+    return pd.DataFrame([asdict(g) for g in games])
+
 
 def format_game_line(g: GameScore, show_id: bool = True) -> str:
     """
@@ -563,7 +562,7 @@ def print_scoreboard(games: List[GameScore], show_id: bool = True) -> None:
 
 # ------------------------------------------------------------
 # CLI
-# ------------------------------------------------------------
+#-------------------------------------------------------------
 def _parse_args(argv=None):
     p = argparse.ArgumentParser(description="Fetch NFL scores from footballdb.com")
 
@@ -681,9 +680,8 @@ def main(argv=None):
         )
         merge_html_and_api(games, api_games)
 
-        # 🔽 apply unified sort
+        # sort snapshot
         games = sort_games(games)
-
 
         # Snapshot outputs (before polling)
         if args.csv:
@@ -712,7 +710,7 @@ def main(argv=None):
                     )
                     merge_html_and_api(games, api_games)
 
-                    # 🔽 apply unified sort
+                    # keep list sorted each update
                     games = sort_games(games)
 
                     print("\n" + "-" * 60)
@@ -736,11 +734,8 @@ def main(argv=None):
         if args.team:
             games = filter_games_by_team(games, args.team)
 
-
-
-        # 🔽 apply unified sort
+        # sort for API mode too
         games = sort_games(games)
-
 
         if args.csv:
             df = scores_to_dataframe(games)
@@ -774,7 +769,7 @@ def main(argv=None):
     if args.team:
         games = filter_games_by_team(games, args.team)
 
-    # 🔽 apply unified sort
+    # apply unified sort
     games = sort_games(games)
 
     if args.csv:
