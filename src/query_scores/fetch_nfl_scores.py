@@ -712,6 +712,9 @@ def main(argv=None):
                     )
                     merge_html_and_api(games, api_games)
 
+                    # 🔽 apply unified sort
+                    games = sort_games(games)
+
                     print("\n" + "-" * 60)
                     ts = time.strftime("[%Y-%m-%d %H:%M:%S]")
                     print(f"{ts} Poll update:")
