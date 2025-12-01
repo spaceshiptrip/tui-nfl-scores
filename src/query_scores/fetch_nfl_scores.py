@@ -5,11 +5,13 @@ Fetch NFL scores from footballdb.com.
 Provides:
   - Library functions
   - CLI with options for:
-      * year / week / type / league
+      * year / week / type / league   (for HTML scores page)
       * team filter
       * JSON output
       * CSV output
       * optional timing debug
+      * HTML homepage/scores page source (default)
+      * XHR API source (--use-api) via gamescores.php
 """
 
 from __future__ import annotations
@@ -18,7 +20,8 @@ import argparse
 import json
 import time
 from dataclasses import dataclass, asdict
-from typing import List, Optional
+from datetime import datetime
+from typing import Any, List, Optional
 
 import requests
 from bs4 import BeautifulSoup
@@ -39,12 +42,13 @@ except ImportError:
 
 
 BASE_URL = "https://www.footballdb.com/"
+GAMESCORES_URL = "https://www.footballdb.com/data/gamescores.php"
 
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/122.0.0.0 Safari/537.36"
+        "Chrome/142.0.0.0 Safari/537.36"
     ),
     "Accept": (
         "text/html,application/xhtml+xml,application/xml;q=0.9,"
@@ -54,6 +58,11 @@ HEADERS = {
     "Referer": "https://www.footballdb.com/",
     "Connection": "keep-alive",
 }
+
+# For the XHR API endpoint we tweak headers slightly
+HEADERS_API = dict(HEADERS)
+HEADERS_API["Accept"] = "*/*"
+HEADERS_API["X-Requested-With"] = "XMLHttpRequest"
 
 
 @dataclass
@@ -68,7 +77,7 @@ class GameScore:
 
 
 # ------------------------------------------------------------
-# URL builder
+# URL builder (for HTML scores page)
 # ------------------------------------------------------------
 def build_scores_url(
     league: str = "NFL",
@@ -78,7 +87,7 @@ def build_scores_url(
     use_homepage: bool = False,
 ) -> str:
     """
-    Build the URL to fetch scores from.
+    Build the URL to fetch scores from (HTML version).
 
     If use_homepage is True OR (year or week) is missing, returns the homepage.
     Otherwise returns the week/season-specific scores URL, e.g.:
@@ -95,64 +104,34 @@ def build_scores_url(
     )
 
 
-def _get_session() -> requests.Session:
+def _get_session(headers: Optional[dict] = None) -> requests.Session:
     """
     Create a requests.Session with browser-like headers.
     """
     session = requests.Session()
-    session.headers.update(HEADERS)
+    session.headers.update(headers or HEADERS)
     return session
 
 
 # ------------------------------------------------------------
-# Core scraper with timing
+# Shared HTML parsing helper
 # ------------------------------------------------------------
-def fetch_live_scores(
-    url: Optional[str] = None,
-    session: Optional[requests.Session] = None,
-    debug_timing: bool = False,
+def _parse_live_scores_from_root(
+    root: BeautifulSoup,
+    url: str,
+    debug_timing: bool,
+    t0: float,
+    t1: float,
+    t2: float,
 ) -> List[GameScore]:
     """
-    Fetch scores from the given URL and return a list of GameScore objects.
-
-    If debug_timing=True, prints timing for:
-      - network
-      - parse
-      - build
-      - total
+    Given a BeautifulSoup root that contains score tables, parse into GameScore list.
     """
-    if url is None:
-        url = BASE_URL
-
-    if session is None:
-        session = _get_session()
-
-    t0 = time.perf_counter()
-    resp = session.get(url, timeout=10)
-    t1 = time.perf_counter()
-
-    if resp.status_code == 403:
-        raise RuntimeError(
-            f"Got 403 Forbidden from Footballdb for URL {url!r}. "
-            "They may be blocking this client/user agent."
-        )
-
-    resp.raise_for_status()
-
-    # Use lxml if available, else html.parser
-    soup = BeautifulSoup(resp.text, BS_PARSER)
-    t2 = time.perf_counter()
-
-    live_div = soup.find("div", id="divLiveScores")
-    if not live_div:
-        raise RuntimeError(
-            f"Could not find divLiveScores on the page at {url!r}. "
-            "The page layout may have changed."
-        )
+    live_div = root.find("div", id="divLiveScores") or root
 
     games: List[GameScore] = []
 
-    # Directly select all score tables inside the live scores div
+    # Directly select all score tables inside the container
     for table in live_div.select("table.scoreboard_hp_tbl"):
         header_row = table.select_one("thead tr.header")
         if not header_row:
@@ -208,7 +187,7 @@ def fetch_live_scores(
 
     if debug_timing:
         print(
-            "timing: "
+            "timing (HTML): "
             f"network={t1 - t0:.3f}s, "
             f"parse={t2 - t1:.3f}s, "
             f"build={t3 - t2:.3f}s, "
@@ -216,6 +195,211 @@ def fetch_live_scores(
         )
 
     return games
+
+
+# ------------------------------------------------------------
+# HTML homepage / scores page scraper
+# ------------------------------------------------------------
+def fetch_live_scores(
+    url: Optional[str] = None,
+    session: Optional[requests.Session] = None,
+    debug_timing: bool = False,
+) -> List[GameScore]:
+    """
+    Fetch scores by scraping the HTML page (homepage or scores page).
+    """
+    if url is None:
+        url = BASE_URL
+
+    if session is None:
+        session = _get_session(HEADERS)
+
+    t0 = time.perf_counter()
+    resp = session.get(url, timeout=10)
+    t1 = time.perf_counter()
+
+    if resp.status_code == 403:
+        raise RuntimeError(
+            f"Got 403 Forbidden from Footballdb for URL {url!r}. "
+            "They may be blocking this client/user agent."
+        )
+
+    resp.raise_for_status()
+
+    # Use lxml if available, else html.parser
+    soup = BeautifulSoup(resp.text, BS_PARSER)
+    t2 = time.perf_counter()
+
+    return _parse_live_scores_from_root(soup, url, debug_timing, t0, t1, t2)
+
+
+# ------------------------------------------------------------
+# API JSON → GameScore mapper for gamescores.php
+# ------------------------------------------------------------
+def _games_from_api_json(data: Any) -> List[GameScore]:
+    """
+    Convert the known gamescores.php JSON schema into GameScore objects.
+
+    Expected shape:
+      {
+        "livescores": 0 or 1,
+        "games": [
+          {
+            "gameid": "2025113001",
+            "status": 1,
+            "scorev": "25",
+            "scoreh": "3",
+            "period": "",
+            "clock": "",
+            "gamestatus": "FINAL",
+            "gameurl": "/games/boxscore/arizona-cardinals-vs-baltimore-ravens-2025113001"
+          },
+          ...
+        ]
+      }
+    """
+
+    games: List[GameScore] = []
+
+    game_list = []
+    if isinstance(data, dict) and isinstance(data.get("games"), list):
+        game_list = data["games"]
+    elif isinstance(data, list):
+        game_list = data
+    else:
+        return games  # unknown structure
+
+    for g in game_list:
+        if not isinstance(g, dict):
+            continue
+
+        game_id = g.get("gameid")
+        status_str = str(g.get("gamestatus", ""))  # e.g. "FINAL", "8:20 PM"
+        scorev = g.get("scorev")
+        scoreh = g.get("scoreh")
+        gameurl = g.get("gameurl", "") or ""
+
+        # --- Date from gameid (YYYYMMDDxx) ---
+        date_str = ""
+        if isinstance(game_id, str) and len(game_id) >= 8:
+            try:
+                d = datetime.strptime(game_id[:8], "%Y%m%d")
+                # Match "Sun 11/30" style
+                date_str = d.strftime("%a %m/%d")
+            except ValueError:
+                date_str = game_id[:8]
+
+        # --- Teams from URL slug ---
+        away_team: Optional[str] = None
+        home_team: Optional[str] = None
+
+        if gameurl:
+            # e.g. "/games/boxscore/arizona-cardinals-vs-baltimore-ravens-2025113001"
+            slug = gameurl.strip("/").split("/")[-1]
+            base_slug = slug
+
+            # Strip the trailing -{gameid} if present
+            if isinstance(game_id, str) and slug.endswith(game_id):
+                base_slug = slug[: -len(game_id)].rstrip("-")
+
+            # Now base_slug should look like: "arizona-cardinals-vs-baltimore-ravens"
+            if "-vs-" in base_slug:
+                away_slug, home_slug = base_slug.split("-vs-", 1)
+
+                def prettify(slug_part: str) -> str:
+                    # "arizona-cardinals" -> "Arizona Cardinals"
+                    return " ".join(w.capitalize() for w in slug_part.split("-") if w)
+
+                away_team = prettify(away_slug)
+                home_team = prettify(home_slug)
+
+        # --- Scores ---
+        def score_to_int(val: Any) -> Optional[int]:
+            if val in (None, "--", ""):
+                return None
+            try:
+                return int(val)
+            except (TypeError, ValueError):
+                return None
+
+        away_score = score_to_int(scorev)
+        home_score = score_to_int(scoreh)
+
+        games.append(
+            GameScore(
+                game_id=str(game_id) if game_id is not None else None,
+                date=date_str,
+                status=status_str,
+                away_team=away_team,
+                away_score=away_score,
+                home_team=home_team,
+                home_score=home_score,
+            )
+        )
+
+    return games
+
+
+# ------------------------------------------------------------
+# XHR API scraper (gamescores.php)
+# ------------------------------------------------------------
+def fetch_live_scores_api(
+    session: Optional[requests.Session] = None,
+    debug_timing: bool = False,
+) -> List[GameScore]:
+    """
+    Fetch scores from the XHR endpoint:
+
+        https://www.footballdb.com/data/gamescores.php
+
+    This is what the homepage uses via XMLHttpRequest.
+
+    It returns JSON like:
+      {"livescores":0,"games":[{...}, ...]}
+
+    We map that into GameScore objects.
+    """
+    url = GAMESCORES_URL
+
+    if session is None:
+        session = _get_session(HEADERS_API)
+
+    t0 = time.perf_counter()
+    resp = session.get(url, timeout=10)
+    t1 = time.perf_counter()
+
+    if resp.status_code == 403:
+        raise RuntimeError(
+            f"Got 403 Forbidden from Footballdb API for URL {url!r}. "
+            "They may be blocking this client/user agent."
+        )
+
+    resp.raise_for_status()
+    text = resp.text
+    stripped = text.lstrip()
+
+    # Should be JSON for gamescores.php
+    if stripped.startswith("{") or stripped.startswith("["):
+        data = resp.json()
+        t2 = time.perf_counter()
+        games = _games_from_api_json(data)
+        t3 = time.perf_counter()
+
+        if debug_timing:
+            print(
+                "timing (API JSON): "
+                f"network={t1 - t0:.3f}s, "
+                f"parse_json={t2 - t1:.3f}s, "
+                f"convert={t3 - t2:.3f}s, "
+                f"total={t3 - t0:.3f}s"
+            )
+
+        return games
+
+    # Fallback: treat as HTML fragment (shouldn't really happen here)
+    soup = BeautifulSoup(text, BS_PARSER)
+    t2 = time.perf_counter()
+    return _parse_live_scores_from_root(soup, url, debug_timing, t0, t1, t2)
 
 
 # ------------------------------------------------------------
@@ -282,7 +466,13 @@ def _parse_args(argv=None):
     p.add_argument(
         "--use-homepage",
         action="store_true",
-        help="Ignore year/week/type and just scrape the main homepage.",
+        help="Ignore year/week/type and just scrape the main homepage (HTML).",
+    )
+
+    p.add_argument(
+        "--use-api",
+        action="store_true",
+        help="Use the XHR API endpoint (gamescores.php) instead of the HTML page.",
     )
 
     p.add_argument(
@@ -308,20 +498,27 @@ def _parse_args(argv=None):
 def main(argv=None):
     args = _parse_args(argv)
 
-    url = build_scores_url(
-        league=args.league,
-        year=args.year,
-        gametype=args.type,
-        week=args.week,
-        use_homepage=args.use_homepage,
-    )
-
-    session = _get_session()
-    games = fetch_live_scores(
-        url=url,
-        session=session,
-        debug_timing=args.debug_timing,
-    )
+    # Choose source: API or HTML
+    if args.use_api:
+        session = _get_session(HEADERS_API)
+        games = fetch_live_scores_api(
+            session=session,
+            debug_timing=args.debug_timing,
+        )
+    else:
+        url = build_scores_url(
+            league=args.league,
+            year=args.year,
+            gametype=args.type,
+            week=args.week,
+            use_homepage=args.use_homepage,
+        )
+        session = _get_session(HEADERS)
+        games = fetch_live_scores(
+            url=url,
+            session=session,
+            debug_timing=args.debug_timing,
+        )
 
     if args.team:
         games = filter_games_by_team(games, args.team)
