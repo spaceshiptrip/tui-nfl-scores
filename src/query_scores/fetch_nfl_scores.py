@@ -12,6 +12,8 @@ Provides:
       * optional timing debug
       * HTML homepage/scores page source (default)
       * XHR API source (--use-api) via gamescores.php
+      * Hybrid mode (--hybrid) that merges HTML names with API scores
+      * Optional polling in hybrid mode (--poll --interval 15)
 """
 
 from __future__ import annotations
@@ -238,9 +240,9 @@ def fetch_live_scores(
 # ------------------------------------------------------------
 def _games_from_api_json(data: Any) -> List[GameScore]:
     """
-    Convert the known gamescores.php JSON schema into GameScore objects.
+    Convert gamescores.php JSON into GameScore objects.
 
-    Expected shape:
+    JSON looks like:
       {
         "livescores": 0 or 1,
         "games": [
@@ -257,6 +259,10 @@ def _games_from_api_json(data: Any) -> List[GameScore]:
           ...
         ]
       }
+
+    IMPORTANT: gameurl's team slugs are NOT reliable (site bug),
+    so we do NOT derive team names from gameurl here.
+    Only scores, status, date, and game_id are trusted.
     """
 
     games: List[GameScore] = []
@@ -277,7 +283,6 @@ def _games_from_api_json(data: Any) -> List[GameScore]:
         status_str = str(g.get("gamestatus", ""))  # e.g. "FINAL", "8:20 PM"
         scorev = g.get("scorev")
         scoreh = g.get("scoreh")
-        gameurl = g.get("gameurl", "") or ""
 
         # --- Date from gameid (YYYYMMDDxx) ---
         date_str = ""
@@ -289,31 +294,6 @@ def _games_from_api_json(data: Any) -> List[GameScore]:
             except ValueError:
                 date_str = game_id[:8]
 
-        # --- Teams from URL slug ---
-        away_team: Optional[str] = None
-        home_team: Optional[str] = None
-
-        if gameurl:
-            # e.g. "/games/boxscore/arizona-cardinals-vs-baltimore-ravens-2025113001"
-            slug = gameurl.strip("/").split("/")[-1]
-            base_slug = slug
-
-            # Strip the trailing -{gameid} if present
-            if isinstance(game_id, str) and slug.endswith(game_id):
-                base_slug = slug[: -len(game_id)].rstrip("-")
-
-            # Now base_slug should look like: "arizona-cardinals-vs-baltimore-ravens"
-            if "-vs-" in base_slug:
-                away_slug, home_slug = base_slug.split("-vs-", 1)
-
-                def prettify(slug_part: str) -> str:
-                    # "arizona-cardinals" -> "Arizona Cardinals"
-                    return " ".join(w.capitalize() for w in slug_part.split("-") if w)
-
-                away_team = prettify(away_slug)
-                home_team = prettify(home_slug)
-
-        # --- Scores ---
         def score_to_int(val: Any) -> Optional[int]:
             if val in (None, "--", ""):
                 return None
@@ -330,9 +310,9 @@ def _games_from_api_json(data: Any) -> List[GameScore]:
                 game_id=str(game_id) if game_id is not None else None,
                 date=date_str,
                 status=status_str,
-                away_team=away_team,
+                away_team=None,  # hybrid mode will fill these from HTML
                 away_score=away_score,
-                home_team=home_team,
+                home_team=None,
                 home_score=home_score,
             )
         )
@@ -403,7 +383,39 @@ def fetch_live_scores_api(
 
 
 # ------------------------------------------------------------
-# Filtering & DataFrame
+# Hybrid helper: merge HTML (names) + API (scores/status)
+# ------------------------------------------------------------
+def merge_html_and_api(html_games: List[GameScore], api_games: List[GameScore]) -> List[GameScore]:
+    """
+    Merge API scores/status into HTML games in-place, keyed by game_id.
+
+    - html_games: from fetch_live_scores() (has names, initial status)
+    - api_games: from fetch_live_scores_api() (fast scores, status, date, ids)
+
+    Returns the same list object as html_games, with scores/status updated.
+    """
+    # Map HTML games by game_id
+    mapping = {g.game_id: g for g in html_games if g.game_id}
+
+    for ag in api_games:
+        gid = ag.game_id
+        if not gid or gid not in mapping:
+            continue
+        base = mapping[gid]
+        # Update scores & status (keep names from HTML)
+        if ag.date:
+            base.date = ag.date
+        base.status = ag.status
+        if ag.away_score is not None:
+            base.away_score = ag.away_score
+        if ag.home_score is not None:
+            base.home_score = ag.home_score
+
+    return html_games
+
+
+# ------------------------------------------------------------
+# Filtering, DataFrame, printing
 # ------------------------------------------------------------
 def filter_games_by_team(games: List[GameScore], team_query: str) -> List[GameScore]:
     """
@@ -436,6 +448,37 @@ def scores_to_dataframe(games: List[GameScore]):
             "Install it with:  pip install pandas"
         )
     return pd.DataFrame([asdict(g) for g in games])
+
+
+def format_game_line(g: GameScore, show_id: bool = True) -> str:
+    """
+    Format a single GameScore for display.
+    Handles cases where team names are missing (API-only mode).
+    """
+    away_score = "--" if g.away_score is None else g.away_score
+    home_score = "--" if g.home_score is None else g.home_score
+
+    if g.away_team and g.home_team:
+        # Full info (HTML or hybrid)
+        core = f"{g.away_team} {away_score} @ {g.home_team} {home_score}"
+    else:
+        # API-only: no reliable team names
+        core = f"Game {g.game_id}: {away_score} @ {home_score}"
+
+    if show_id and g.game_id:
+        suffix = f"{g.status} (id={g.game_id})"
+    else:
+        suffix = g.status
+
+    return f"{g.date:<10} | {core} | {suffix}"
+
+
+def print_scoreboard(games: List[GameScore], show_id: bool = True) -> None:
+    if not games:
+        print("No games found for the given filters.")
+        return
+    for g in games:
+        print(format_game_line(g, show_id=show_id))
 
 
 # ------------------------------------------------------------
@@ -476,15 +519,33 @@ def _parse_args(argv=None):
     )
 
     p.add_argument(
+        "--hybrid",
+        action="store_true",
+        help="Hybrid mode: HTML once for team names + API for fast scores.",
+    )
+
+    p.add_argument(
+        "--poll",
+        action="store_true",
+        help="In --hybrid mode, keep polling the API and updating scores until Ctrl+C.",
+    )
+    p.add_argument(
+        "--interval",
+        type=float,
+        default=15.0,
+        help="Polling interval in seconds for --poll (default: 15).",
+    )
+
+    p.add_argument(
         "-T",
         "--team",
         help="Filter to games involving this team (case-insensitive substring match).",
     )
-    p.add_argument("--json", action="store_true", help="Output JSON instead of text.")
+    p.add_argument("--json", action="store_true", help="Output JSON snapshot instead of text.")
     p.add_argument(
         "--csv",
         metavar="OUTFILE",
-        help="Save results to a CSV file (requires pandas).",
+        help="Save a snapshot of results to a CSV file (requires pandas).",
     )
     p.add_argument(
         "--debug-timing",
@@ -498,14 +559,20 @@ def _parse_args(argv=None):
 def main(argv=None):
     args = _parse_args(argv)
 
-    # Choose source: API or HTML
-    if args.use_api:
-        session = _get_session(HEADERS_API)
-        games = fetch_live_scores_api(
-            session=session,
-            debug_timing=args.debug_timing,
-        )
-    else:
+    # If both --hybrid and --use-api are passed, prefer hybrid.
+    if args.hybrid and args.use_api:
+        print("Note: --hybrid implies API+HTML; ignoring --use-api.")
+        args.use_api = False
+
+    if args.poll and not args.hybrid:
+        print("Warning: --poll is currently only supported in --hybrid mode. Ignoring --poll.")
+        args.poll = False
+
+    # ------------------------------
+    # HYBRID MODE
+    # ------------------------------
+    if args.hybrid:
+        # 1) HTML baseline for team names
         url = build_scores_url(
             league=args.league,
             year=args.year,
@@ -513,40 +580,117 @@ def main(argv=None):
             week=args.week,
             use_homepage=args.use_homepage,
         )
-        session = _get_session(HEADERS)
-        games = fetch_live_scores(
+        session_html = _get_session(HEADERS)
+        base_games = fetch_live_scores(
             url=url,
+            session=session_html,
+            debug_timing=args.debug_timing,
+        )
+
+        # Apply team filter early (we only care about these games)
+        if args.team:
+            games = filter_games_by_team(base_games, args.team)
+        else:
+            games = base_games
+
+        # 2) Initial API fetch to update scores/status
+        session_api = _get_session(HEADERS_API)
+        api_games = fetch_live_scores_api(
+            session=session_api,
+            debug_timing=args.debug_timing,
+        )
+        merge_html_and_api(games, api_games)
+
+        # Snapshot outputs (before polling)
+        if args.csv:
+            df = scores_to_dataframe(games)
+            df.to_csv(args.csv, index=False)
+            print(f"Saved CSV snapshot → {args.csv}")
+
+        if args.json:
+            print(json.dumps([asdict(g) for g in games], indent=2))
+            if not args.poll:
+                return
+            else:
+                print("Note: JSON snapshot printed once; continuing polling with text output...")
+
+        # Initial scoreboard print
+        print_scoreboard(games)
+
+        # Optional polling loop
+        if args.poll:
+            try:
+                while True:
+                    time.sleep(args.interval)
+                    api_games = fetch_live_scores_api(
+                        session=session_api,
+                        debug_timing=args.debug_timing,
+                    )
+                    merge_html_and_api(games, api_games)
+
+                    print("\n" + "-" * 60)
+                    ts = time.strftime("[%Y-%m-%d %H:%M:%S]")
+                    print(f"{ts} Poll update:")
+                    print_scoreboard(games)
+            except KeyboardInterrupt:
+                print("\nStopped polling.")
+        return
+
+    # ------------------------------
+    # PURE API MODE (no names, just scores/status)
+    # ------------------------------
+    if args.use_api:
+        session = _get_session(HEADERS_API)
+        games = fetch_live_scores_api(
             session=session,
             debug_timing=args.debug_timing,
         )
 
+        if args.team:
+            games = filter_games_by_team(games, args.team)
+
+        if args.csv:
+            df = scores_to_dataframe(games)
+            df.to_csv(args.csv, index=False)
+            print(f"Saved CSV → {args.csv}")
+
+        if args.json:
+            print(json.dumps([asdict(g) for g in games], indent=2))
+            return
+
+        print_scoreboard(games)
+        return
+
+    # ------------------------------
+    # PURE HTML MODE (original scraper)
+    # ------------------------------
+    url = build_scores_url(
+        league=args.league,
+        year=args.year,
+        gametype=args.type,
+        week=args.week,
+        use_homepage=args.use_homepage,
+    )
+    session = _get_session(HEADERS)
+    games = fetch_live_scores(
+        url=url,
+        session=session,
+        debug_timing=args.debug_timing,
+    )
+
     if args.team:
         games = filter_games_by_team(games, args.team)
 
-    # CSV output (if requested)
     if args.csv:
         df = scores_to_dataframe(games)
         df.to_csv(args.csv, index=False)
         print(f"Saved CSV → {args.csv}")
 
-    # JSON output (if requested)
     if args.json:
         print(json.dumps([asdict(g) for g in games], indent=2))
         return
 
-    # Human-readable output
-    if not games:
-        print("No games found for the given filters.")
-        return
-
-    for g in games:
-        away = "--" if g.away_score is None else g.away_score
-        home = "--" if g.home_score is None else g.home_score
-        print(
-            f"{g.date:<10} | "
-            f"{g.away_team} {away} @ {g.home_team} {home} | "
-            f"{g.status} (id={g.game_id})"
-        )
+    print_scoreboard(games)
 
 
 if __name__ == "__main__":
