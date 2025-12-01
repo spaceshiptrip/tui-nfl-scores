@@ -1,99 +1,66 @@
-# 🏈 query-scores  
-Fetch NFL scores from **Footballdb.com** via CLI or Python library.
+# Query Scores
 
-This tool provides:
+This project fetches NFL scores from FootballDB using three modes:
 
-- A **CLI command**: `nflscores`
-- A **Python library** for programmatic access  
-- Support for:
-  - Specific **season/year/week**
-  - Filtering by **team**
-  - JSON output
-  - **CSV export**
-  - Homepage “current week” scrape  
-- Modern Python packaging (`pyproject.toml`)
+## Modes
 
----
+### 1. HTML Mode (Default)
+Parses the scoreboard HTML and returns full team names, scores, dates, and status.
 
-## 📦 Installation
+### 2. API Mode (`--use-api`)
+Uses the lightweight `gamescores.php` JSON endpoint for fast score/status polling.
+Note: Team names cannot be trusted from this endpoint.
 
-### 🔹 Using uv (recommended)
+### 3. Hybrid Mode (`--hybrid`)
+Loads HTML once to get correct team names, then polls the JSON API on an interval to update scores and statuses.
 
-Install globally as a uv tool:
-
-```bash
-uv tool install .
+### Polling Mode
+Use:
+```
+--poll N   # poll every N seconds
+--hybrid   # use hybrid mode (recommended for live updates)
 ```
 
-Or install from anywhere:
-
-```bash
-uv tool install /path/to/query-scores
+Example:
+```
+python src/query_scores/fetch_nfl_scores.py --hybrid --poll 10
 ```
 
-After install:
+This prints updated scores every 10 seconds.
 
-```bash
-nflscores --help
-```
-
-Uninstall:
-
-```bash
-uv tool uninstall query-scores
-```
-
----
-
-### 🔹 Editable install for development
-
-```bash
-pip install -e .
-```
-
----
-
-## 🚀 CLI Usage
-
-```bash
-nflscores --help
-```
-
-Examples:
-
-```bash
-nflscores --use-homepage
-nflscores -y 2025 -w 13 --team Miami
-nflscores -y 2025 -w 13 --csv week13.csv
-```
-
----
-
-## 🧩 Library Usage
-
-```python
-from query_scores import fetch_live_scores, build_scores_url
-
-url = build_scores_url(year=2025, week=13)
-games = fetch_live_scores(url)
-```
-
----
-
-## 📁 Project Structure
+## Installation with uv
 
 ```
-query-scores/
-├─ pyproject.toml
-├─ README.md
-└─ src/
-   └─ query_scores/
-      ├─ __init__.py
-      └─ fetch_nfl_scores.py
+uv venv
+source .venv/bin/activate
+uv pip install -r requirements.txt
+uv pip install .
 ```
 
----
+Or install directly from your working directory:
 
-## 📝 License
+```
+uv pip install -e .
+```
 
-MIT License © Jay Torres
+## CLI Examples
+
+Fetch current week:
+```
+python src/query_scores/fetch_nfl_scores.py
+```
+
+Fetch specific week/season:
+```
+python src/query_scores/fetch_nfl_scores.py --season 2025 --week 13
+```
+
+Use API mode:
+```
+python src/query_scores/fetch_nfl_scores.py --use-api
+```
+
+Use hybrid + polling:
+```
+python src/query_scores/fetch_nfl_scores.py --hybrid --poll 5
+```
